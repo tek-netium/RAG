@@ -31,24 +31,24 @@
 
 ## 项目结构
 
-RAG/
-├── core/                    # 核心模块
-│   ├── agent.py             # Agent 构建与流式输出
-│   ├── retriever.py         # 混合检索器与检索工具
-│   ├── document_processor.py # 文档发现、去重与入库
-│   ├── vectorstore.py       # 向量数据库构建
-│   ├── text_splitter.py     # 文本递归切分
-│   ├── loaders.py           # 文档加载（PDF/MD）
-│   ├── pdf_to_markdown.py   # PDF 转 Markdown（OCR）
-│   ├── ingestion_state.py   # 文件处理状态记录
-│   └── app_factory.py       # RAG 应用组装工厂
-├── api.py                   # FastAPI REST API
-├── main.py                  # CLI 交互入口
-├── evaluate.py              # RAGAS 评估脚本
-├── config.py                # 配置数据类
-├── models.py                # LLM / Embedding 构建
-├── rag-chat-frontend/       # React 前端
-└── requirements.txt         # 依赖清单
+- core/                          核心模块
+  - agent.py                     Agent 构建与流式输出
+  - retriever.py                 混合检索器与检索工具
+  - document_processor.py        文档发现、去重与入库
+  - vectorstore.py               Chroma 向量库构建
+  - text_splitter.py             文本递归切分
+  - loaders.py                   文档加载（PDF/MD）
+  - pdf_to_markdown.py           PDF 转 Markdown（OCR）
+  - ingestion_state.py           文件处理状态记录
+  - app_factory.py               RAG 应用组装工厂
+- api.py                         FastAPI + SSE 流式 API
+- main.py                        CLI 交互入口
+- evaluate.py                    RAGAS 评估脚本
+- config.py                      配置数据类
+- models.py                      LLM/Embedding 构建
+- rag-chat-frontend/             React + Vite 前端
+- requirements.txt               Python 依赖
+- .gitignore
 
 ## 快速开始
 
