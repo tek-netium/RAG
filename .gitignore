@@ -1,0 +1,35 @@
+# ===== Python =====
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.egg
+
+# ===== 运行时数据 =====
+chroma_langchain_db/
+processed_files.json
+uploads/
+
+# ===== 下载的模型文件（运行时通过 huggingface 自动下载） =====
+BAAI/
+
+# ===== 环境变量（可能含 API Key） =====
+.env
+.env.local
+.env.*.local
+
+# ===== IDE / 编辑器 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ===== 前端（rag-chat-frontend 有独立的 .gitignore，这里做兜底） =====
+node_modules/
