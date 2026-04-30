@@ -1,4 +1,4 @@
-const BASE_URL = ''; // 使用代理，无需写全域名
+const BASE_URL = import.meta.env.VITE_API_BASE || '';
 
 // 处理 SSE 流（用于 /chat）
 export async function* streamChat({ message, sessionId }) {
@@ -18,7 +18,6 @@ export async function* streamChat({ message, sessionId }) {
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        // 保留最后一个可能不完整的行到 buffer
         buffer = lines.pop();
 
         for (const line of lines) {
@@ -46,10 +45,10 @@ export async function clearHistory(sessionId) {
 }
 
 // 上传文档
-export async function uploadDocument(file) {
+export async function uploadDocument(file, sessionId) {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await fetch(`${BASE_URL}/documents/upload`, {
+    const res = await fetch(`${BASE_URL}/documents/upload?session_id=${encodeURIComponent(sessionId)}`, {
         method: 'POST',
         body: formData,
     });
@@ -58,15 +57,40 @@ export async function uploadDocument(file) {
 }
 
 // 获取所有已上传文档
-export async function listDocuments() {
-    const res = await fetch(`${BASE_URL}/documents`);
+export async function listDocuments(sessionId) {
+    const res = await fetch(`${BASE_URL}/documents?session_id=${encodeURIComponent(sessionId)}`);
     if (!res.ok) throw new Error('获取文档列表失败');
     return res.json();
 }
 
 // 删除指定文档
-export async function deleteDocument(filename) {
-    const res = await fetch(`${BASE_URL}/documents/${filename}`, { method: 'DELETE' });
+export async function deleteDocument(filename, sessionId) {
+    const res = await fetch(`${BASE_URL}/documents/${filename}?session_id=${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('删除失败');
+    return res.json();
+}
+
+// 获取所有会话
+export async function listSessions() {
+    const res = await fetch(`${BASE_URL}/sessions`);
+    if (!res.ok) throw new Error('获取会话列表失败');
+    return res.json();
+}
+
+// 创建新会话
+export async function createSession(name) {
+    const res = await fetch(`${BASE_URL}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error('创建会话失败');
+    return res.json();
+}
+
+// 删除会话
+export async function deleteSession(sessionId) {
+    const res = await fetch(`${BASE_URL}/sessions/${sessionId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('删除会话失败');
     return res.json();
 }

@@ -59,16 +59,25 @@ def ingest_file(
     vector_db: Chroma,
     load_fn: Callable[[str], str],
     split_fn: Callable[[str], list[str]],
+    session_id: str | None = None,
 ) -> int:
     """加载单个文件、切分为文本块并写入向量数据库，返回块数量。"""
     file_name = os.path.basename(file_path)
-    vector_db.delete(where={"source": file_name})
+    sid = session_id or "default"
+    existing = vector_db.get(
+        where={"$and": [{"source": file_name}, {"session_id": sid}]}, include=[]
+    )
+    if existing.get("ids"):
+        vector_db.delete(ids=existing["ids"])
 
     markdown_content = load_fn(file_path)
     chunks = split_fn(markdown_content)
 
     ids = [_get_id(chunk) for chunk in chunks]
-    metadatas = [{"source": file_name, "chunk_index": i} for i in range(len(chunks))]
+    metadatas = [
+        {"source": file_name, "chunk_index": i, "session_id": sid}
+        for i in range(len(chunks))
+    ]
     vector_db.add_texts(chunks, ids=ids, metadatas=metadatas)
     return len(chunks)
 

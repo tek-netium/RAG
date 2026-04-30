@@ -12,10 +12,13 @@ class ProcessedRecordStore:
     def load(self) -> dict[str, float]:
         """从JSON文件加载已处理文件记录（文件路径到修改时间的映射）。"""
         if os.path.exists(self.path):
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # json numbers come back as int/float; normalize to float
-            return {k: float(v) for k, v in data.items()}
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return {k: float(v) for k, v in data.items()}
+            except (json.JSONDecodeError, ValueError, OSError):
+                print(f"[record] 解析失败，将重建: {self.path}")
+                return {}
         return {}
 
     def save(self, record: dict[str, float]) -> None:

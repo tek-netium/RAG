@@ -9,14 +9,24 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_classic.retrievers import EnsembleRetriever
 
 
-def build_vector_retriever(vector_db: Chroma, *, k: int):
+def build_vector_retriever(vector_db: Chroma, *, k: int, session_id: str | None = None):
     """基于Chroma向量数据库构建向量检索器，返回top-k结果。"""
-    return vector_db.as_retriever(search_kwargs={"k": k})
+    search_kwargs: dict = {"k": k}
+    if session_id:
+        search_kwargs["filter"] = {"session_id": session_id}
+    return vector_db.as_retriever(search_kwargs=search_kwargs)
 
 
-def build_bm25_retriever_from_chroma(vector_db: Chroma, *, k: int) -> BM25Retriever:
+def build_bm25_retriever_from_chroma(
+    vector_db: Chroma, *, k: int, session_id: str | None = None
+) -> BM25Retriever:
     """从Chroma向量库中提取全部文档构建BM25关键词检索器。"""
-    all_docs_in_db = vector_db.get(include=["documents", "metadatas"])
+    if session_id:
+        all_docs_in_db = vector_db.get(
+            where={"session_id": session_id}, include=["documents", "metadatas"]
+        )
+    else:
+        all_docs_in_db = vector_db.get(include=["documents", "metadatas"])
     documents = [
         Document(page_content=doc, metadata=meta if meta is not None else {})
         for doc, meta in zip(all_docs_in_db["documents"], all_docs_in_db["metadatas"])
@@ -32,10 +42,11 @@ def build_ensemble_retriever(
     vector_k: int,
     bm25_k: int,
     weights: Sequence[float] = (0.7, 0.3),
+    session_id: str | None = None,
 ) -> EnsembleRetriever:
     """构建融合向量检索与BM25检索的混合检索器，按权重合并排序结果。"""
-    vector_retriever = build_vector_retriever(vector_db, k=vector_k)
-    bm25_retriever = build_bm25_retriever_from_chroma(vector_db, k=bm25_k)
+    vector_retriever = build_vector_retriever(vector_db, k=vector_k, session_id=session_id)
+    bm25_retriever = build_bm25_retriever_from_chroma(vector_db, k=bm25_k, session_id=session_id)
 
     return EnsembleRetriever(
         retrievers=[vector_retriever, bm25_retriever],

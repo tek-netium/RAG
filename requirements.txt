@@ -7,7 +7,7 @@ attrs==26.1.0
 beautifulsoup4==4.14.3
 certifi==2026.2.25
 charset-normalizer==3.4.7
-Chroma==0.2.0
+chromadb==0.5.23
 click==8.3.2
 colorama==0.4.6
 colorlog==6.10.1
@@ -83,6 +83,7 @@ python-pptx==1.0.2
 pywin32==311
 PyYAML==6.0.3
 rapidocr==3.8.1
+redis==7.1.0
 referencing==0.37.0
 regex==2026.4.4
 requests==2.33.1

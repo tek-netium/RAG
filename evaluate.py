@@ -32,7 +32,7 @@ from config import SYSTEM_PROMPT as prompt
 # ======================== 配置 ========================
 # RAG 生成阶段：本地 Ollama（Qwen）
 llm = ChatOllama(
-    model="qwen3.5:9b",
+    model="qwen3.5:4b",
     temperature=0.2,
     num_predict=16384,
 )

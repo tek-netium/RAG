@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
@@ -21,7 +22,7 @@ SYSTEM_PROMPT = (
 @dataclass(frozen=True)
 class AppConfig:
     # Models
-    ollama_model: str = "qwen3.5:9b"
+    ollama_model: str = "qwen3.5:4b"
     ollama_temperature: float = 0.2
     ollama_num_predict: int = 4096
 
@@ -44,4 +45,25 @@ class AppConfig:
     redis_ttl_seconds: int = 3600
 
 
-DEFAULT_CONFIG = AppConfig()
+def _env_str(key: str, default: str) -> str:
+    return os.environ.get(key, default)
+
+
+def _env_int(key: str, default: int) -> int:
+    val = os.environ.get(key)
+    return int(val) if val else default
+
+
+def _env_float(key: str, default: float) -> float:
+    val = os.environ.get(key)
+    return float(val) if val else default
+
+
+DEFAULT_CONFIG = AppConfig(
+    ollama_model=_env_str("OLLAMA_MODEL", AppConfig.ollama_model),
+    ollama_temperature=_env_float("OLLAMA_TEMPERATURE", AppConfig.ollama_temperature),
+    ollama_num_predict=_env_int("OLLAMA_NUM_PREDICT", AppConfig.ollama_num_predict),
+    embedding_model_name=_env_str("EMBEDDING_MODEL", AppConfig.embedding_model_name),
+    embedding_device=_env_str("EMBEDDING_DEVICE", AppConfig.embedding_device),
+    redis_url=_env_str("REDIS_URL", AppConfig.redis_url),
+)

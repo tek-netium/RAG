@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Iterator
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool
@@ -41,7 +43,22 @@ def _upload_dir() -> str:
     return os.environ.get("RAG_UPLOAD_DIR") or "./uploads"
 
 
-def _build_retriever_and_tools(*, vector_db, cfg: AppConfig):
+def _find_uploaded_file(filename: str) -> list[str]:
+    """在上传目录中查找匹配文件名的所有路径（支持子目录）。"""
+    upload_dir = os.path.abspath(_upload_dir())
+    found: list[str] = []
+    if not os.path.isdir(upload_dir):
+        return found
+    for root, _dirs, files in os.walk(upload_dir):
+        for f in files:
+            if f == filename:
+                found.append(os.path.join(root, f))
+    return found
+
+
+def _build_retriever_and_tools(
+    *, vector_db, cfg: AppConfig, session_id: str | None = None
+):
     """构建检索器和工具列表，空数据库时降级为纯向量检索器。"""
     try:
         ensemble = build_ensemble_retriever(
@@ -49,11 +66,15 @@ def _build_retriever_and_tools(*, vector_db, cfg: AppConfig):
             vector_k=cfg.vector_k,
             bm25_k=cfg.bm25_k,
             weights=cfg.ensemble_weights,
+            session_id=session_id,
         )
         return ensemble, [make_retrieve_context_tool(ensemble)]
     except Exception:
         # Fallback: vector retriever only, wrapped into the same tool API shape.
-        vector_retriever = vector_db.as_retriever(search_kwargs={"k": cfg.vector_k})
+        search_kwargs: dict = {"k": cfg.vector_k}
+        if session_id:
+            search_kwargs["filter"] = {"session_id": session_id}
+        vector_retriever = vector_db.as_retriever(search_kwargs=search_kwargs)
 
         def _retrieve_context(query: str):
             docs = vector_retriever.invoke(query)
@@ -76,11 +97,13 @@ def _build_retriever_and_tools(*, vector_db, cfg: AppConfig):
             return vector_retriever, [_retrieve_context]
 
 
-def _rebuild_agent(*, vector_db, cfg: AppConfig, history_factory):
+def _rebuild_agent(
+    *, vector_db, cfg: AppConfig, history_factory, session_id: str | None = None
+):
     """文档变更后热重建Agent、检索器和工具，无需重启服务。"""
     llm = build_llm(cfg)
     ensemble_or_retriever, tools = _build_retriever_and_tools(
-        vector_db=vector_db, cfg=cfg
+        vector_db=vector_db, cfg=cfg, session_id=session_id
     )
     agent_with_memory = build_agent_with_memory(
         llm=llm,
@@ -126,27 +149,59 @@ async def lifespan(app: FastAPI):
         ttl_seconds=cfg.redis_ttl_seconds,
     )
 
-    ensemble_or_retriever, tools = _build_retriever_and_tools(
-        vector_db=vector_db, cfg=cfg
-    )
-    agent_with_memory = build_agent_with_memory(
-        llm=llm,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        get_session_history=history_factory,
-    )
-
     app.state.cfg = cfg
     app.state.vector_db = vector_db
     app.state.record_store = record_store
     app.state.history_factory = history_factory
-    app.state.retriever = ensemble_or_retriever
-    app.state.agent_with_memory = agent_with_memory
+    app.state.session_agents: dict[str, object] = {}
 
     yield
 
 
+def _get_redis():
+    """获取Redis客户端实例，不可用时返回None。"""
+    try:
+        import redis as redis_client
+
+        return redis_client.from_url(DEFAULT_CONFIG.redis_url)
+    except Exception:
+        return None
+
+
+def _register_session(session_id: str):
+    """将session_id注册到Redis会话列表中。"""
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        r.sadd("rag:session_ids", session_id)
+    except Exception:
+        pass
+
+
+def _get_or_create_session_agent(session_id: str):
+    """获取或创建指定会话的Agent和检索器。"""
+    if session_id not in app.state.session_agents:
+        cfg: AppConfig = app.state.cfg
+        agent, retriever = _rebuild_agent(
+            vector_db=app.state.vector_db,
+            cfg=cfg,
+            history_factory=app.state.history_factory,
+            session_id=session_id,
+        )
+        app.state.session_agents[session_id] = (agent, retriever)
+    return app.state.session_agents[session_id]
+
+
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ChatRequest(BaseModel):
@@ -156,9 +211,11 @@ class ChatRequest(BaseModel):
 
 def _chat_sse_stream(*, session_id: str, user_message: str) -> Iterator[str]:
     """生成聊天SSE流式事件，包括回答增量、检索上下文和错误信息。"""
+    _register_session(session_id)
+    agent_with_memory = _get_or_create_session_agent(session_id)[0]
     try:
         for evt in stream_events(
-            agent_with_memory=app.state.agent_with_memory,
+            agent_with_memory=agent_with_memory,
             session_id=session_id,
             user_input=user_message,
         ):
@@ -213,44 +270,53 @@ async def clear_history(session_id: str):
 
 @app.post("/documents/upload")
 async def upload_document(
-    file: UploadFile = File(...), background_tasks: BackgroundTasks = None
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    session_id: str = Query("default"),
 ):
     """上传文档并异步处理入库，自动热重建检索器。"""
     upload_dir = _upload_dir()
-    os.makedirs(upload_dir, exist_ok=True)
     file_path = os.path.join(upload_dir, file.filename)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
 
+    sid = session_id
+
     def process_one() -> None:
-        cfg: AppConfig = app.state.cfg
-        vector_db = app.state.vector_db
+        try:
+            cfg: AppConfig = app.state.cfg
+            vector_db = app.state.vector_db
 
-        ingest_file(
-            file_path=file_path,
-            vector_db=vector_db,
-            load_fn=load_document,
-            split_fn=text_splitter,
-        )
+            ingest_file(
+                file_path=file_path,
+                vector_db=vector_db,
+                load_fn=load_document,
+                split_fn=text_splitter,
+                session_id=sid,
+            )
 
-        # Update processed record so future ingestions can skip unchanged files.
-        record_store: ProcessedRecordStore = app.state.record_store
-        record = record_store.load()
-        record[file_path] = float(os.path.getmtime(file_path))
-        record_store.save(record)
+            # Update processed record so future ingestions can skip unchanged files.
+            record_store: ProcessedRecordStore = app.state.record_store
+            record = record_store.load()
+            record[file_path] = float(os.path.getmtime(file_path))
+            record_store.save(record)
 
-        # Hot-rebuild retriever/tools/agent (memory/history factory stays the same).
-        history_factory = app.state.history_factory
-        agent_with_memory, retriever = _rebuild_agent(
-            vector_db=vector_db,
-            cfg=cfg,
-            history_factory=history_factory,
-        )
-        app.state.agent_with_memory = agent_with_memory
-        app.state.retriever = retriever
-        print(f"[文档] 已处理并更新检索器: {file.filename}")
+            # Hot-rebuild session-specific agent if it exists
+            if sid in app.state.session_agents:
+                history_factory = app.state.history_factory
+                agent_with_memory, retriever = _rebuild_agent(
+                    vector_db=vector_db,
+                    cfg=cfg,
+                    history_factory=history_factory,
+                    session_id=sid,
+                )
+                app.state.session_agents[sid] = (agent_with_memory, retriever)
+            print(f"[文档] 已处理并更新检索器 [{sid}]: {file.filename}")
+        except Exception as e:
+            print(f"[文档] 处理失败 [{sid}]: {file.filename} - {e}")
 
     if background_tasks is not None:
         background_tasks.add_task(process_one)
@@ -261,23 +327,50 @@ async def upload_document(
 
 
 @app.get("/documents")
-async def list_documents():
+async def list_documents(session_id: str = Query("default")):
     vector_db = app.state.vector_db
     all_meta = vector_db.get(include=["metadatas"])
     sources: set[str] = set()
     for meta in all_meta.get("metadatas", []):
-        if meta and "source" in meta:
+        if not meta or "source" not in meta:
+            continue
+        doc_sid = meta.get("session_id")
+        if doc_sid == session_id or (doc_sid is None and session_id == "default"):
             sources.add(str(meta["source"]))
     return {"documents": sorted(sources)}
 
 
 @app.delete("/documents/{filename}")
-async def delete_document(filename: str):
+async def delete_document(filename: str, session_id: str = Query("default")):
     try:
         vector_db = app.state.vector_db
-        vector_db.delete(where={"source": filename})
+        # Try exact match first
+        results = vector_db.get(
+            where={"$and": [{"source": filename}, {"session_id": session_id}]},
+            include=[],
+        )
+        if not results.get("ids") and session_id == "default":
+            # Backward compat: old docs without session_id field
+            results = vector_db.get(
+                where={"source": filename},
+                include=[],
+            )
+            if results.get("ids"):
+                all_meta = vector_db.get(ids=results["ids"], include=["metadatas"])
+                keep_ids = [
+                    i
+                    for i, m in zip(results["ids"], all_meta.get("metadatas", []))
+                    if m
+                    and (
+                        m.get("session_id") == "default" or m.get("session_id") is None
+                    )
+                ]
+                results = {"ids": keep_ids}
+        ids_to_delete = results.get("ids", [])
+        if ids_to_delete:
+            vector_db.delete(ids=ids_to_delete)
 
-        # Also remove any matching entries from processed record store (keys are file paths).
+        # Also remove matching entries from processed record store
         record_store: ProcessedRecordStore = app.state.record_store
         record = record_store.load()
         new_record = {
@@ -285,18 +378,106 @@ async def delete_document(filename: str):
         }
         record_store.save(new_record)
 
-        # Rebuild agent so BM25 / retriever reflects the current DB.
-        cfg: AppConfig = app.state.cfg
-        history_factory = app.state.history_factory
-        agent_with_memory, retriever = _rebuild_agent(
-            vector_db=vector_db,
-            cfg=cfg,
-            history_factory=history_factory,
+        # Delete physical file from uploads
+        found_files = _find_uploaded_file(filename)
+        print(
+            f"[文档] 查找物理文件 '{filename}': 找到 {len(found_files)} 个: {found_files}"
         )
-        app.state.agent_with_memory = agent_with_memory
-        app.state.retriever = retriever
+        for file_path in found_files:
+            try:
+                os.remove(file_path)
+                print(f"[文档] 已删除物理文件: {file_path}")
+            except OSError as exc:
+                print(f"[文档] 删除物理文件失败: {file_path} - {exc}")
+
+        # Rebuild session agent if it exists (ignore build failures)
+        if session_id in app.state.session_agents:
+            try:
+                cfg: AppConfig = app.state.cfg
+                history_factory = app.state.history_factory
+                agent_with_memory, retriever = _rebuild_agent(
+                    vector_db=vector_db,
+                    cfg=cfg,
+                    history_factory=history_factory,
+                    session_id=session_id,
+                )
+                app.state.session_agents[session_id] = (agent_with_memory, retriever)
+            except Exception:
+                app.state.session_agents.pop(session_id, None)
+                print(f"[文档] 会话 {session_id} 中无更多文档，已移除 Agent 缓存")
 
         return {"status": "deleted", "filename": filename}
+    except Exception as e:
+        print(f"[文档] 删除失败 '{filename}': {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SessionCreate(BaseModel):
+    name: str = ""
+
+
+@app.post("/sessions")
+async def create_session(req: SessionCreate):
+    session_id = uuid.uuid4().hex[:12]
+    name = req.name or f"会话 {session_id[:6]}"
+    r = _get_redis()
+    if r is not None:
+        try:
+            r.hset("rag:session_names", session_id, name)
+            r.sadd("rag:session_ids", session_id)
+        except Exception:
+            pass
+    return {"session_id": session_id, "name": name}
+
+
+@app.get("/sessions")
+async def list_sessions():
+    r = _get_redis()
+    if r is None:
+        return {"sessions": []}
+    try:
+        session_ids = r.smembers("rag:session_ids")
+        names = r.hgetall("rag:session_names")
+
+        sessions = []
+        for sid in session_ids:
+            sid = sid.decode() if isinstance(sid, bytes) else sid
+            name = names.get(sid.encode() if isinstance(sid, str) else sid)
+            if isinstance(name, bytes):
+                name = name.decode()
+            sessions.append({"session_id": sid, "name": name or sid[:8]})
+
+        sessions.sort(key=lambda s: s["session_id"])
+        return {"sessions": sessions}
+    except Exception:
+        return {"sessions": []}
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    try:
+        # Clear chat history
+        app.state.history_factory(session_id).clear()
+
+        # Delete all documents for this session
+        vector_db = app.state.vector_db
+        results = vector_db.get(where={"session_id": session_id}, include=[])
+        if results.get("ids"):
+            vector_db.delete(ids=results["ids"])
+
+        # Remove session agent
+        app.state.session_agents.pop(session_id, None)
+
+        # Remove from Redis
+        r = _get_redis()
+        if r is not None:
+            try:
+                r.srem("rag:session_ids", session_id)
+                r.hdel("rag:session_names", session_id)
+            except Exception:
+                pass
+
+        return {"status": "deleted", "session_id": session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
